@@ -4,7 +4,7 @@ import math
 from pathlib import Path
 from PySide6.QtWidgets import (
     QApplication, QWidget, QPushButton, QVBoxLayout, QLabel, QTextEdit,
-    QSizePolicy, QSpacerItem, QHBoxLayout, QSlider, QFrame
+    QSizePolicy, QSpacerItem, QHBoxLayout, QSlider, QFrame, QMessageBox
 )
 from PySide6.QtCore import Qt, QTimer, QRectF
 from PySide6.QtGui import QColor, QPalette, QPainter, QBrush, QPen, QFont
@@ -30,7 +30,6 @@ def parse_and_build_path(lines):
     - Конвертация единиц (G20->inches -> mm)
     - G90/G91/G92 учтены
     - M03/M05 устанавливают laser_on
-    - Вся логика парсинга внутри main.py (нет внешних зависимостей)
     """
     segments = []
     absolute = True
@@ -93,9 +92,7 @@ def parse_and_build_path(lines):
             continue
         # Laser state
         if cmd == "M03":
-            # optional S parameter can set power but not needed for timeline; set laser on
             laser_on = True
-            # M03 does not change feedrate
             continue
         if cmd == "M05":
             laser_on = False
@@ -110,7 +107,6 @@ def parse_and_build_path(lines):
         # Get feed if present (modal)
         fval = get("F")
         if fval is not None:
-            # feed is given in current units (converted in get); it's modal for next moves
             current_feed = fval
 
         # Moves
@@ -121,14 +117,12 @@ def parse_and_build_path(lines):
             if not absolute:
                 tx = cur_x + tx
                 ty = cur_y + ty
-            # choose feed: for G00 prefer explicit F or default_rapid; for G01 prefer current_feed or default_cut_feed
             if cmd == "G00":
                 chosen_feed = current_feed if current_feed is not None else default_rapid_feed
                 rapid_flag = True
             else:
                 chosen_feed = current_feed if current_feed is not None else default_cut_feed
                 rapid_flag = False
-            # generate interpolation points (1 mm step approx)
             dist = math.hypot(tx - cur_x, ty - cur_y)
             steps = max(1, int(dist / 1.0))
             pts = []
@@ -153,7 +147,6 @@ def parse_and_build_path(lines):
             if not absolute:
                 tx = cur_x + tx
                 ty = cur_y + ty
-            # default feed for arc uses current_feed or default_cut_feed
             chosen_feed = current_feed if current_feed is not None else default_cut_feed
             cx = cur_x + ioff
             cy = cur_y + joff
@@ -183,11 +176,10 @@ def parse_and_build_path(lines):
             cur_x, cur_y = tx, ty
             continue
 
-        # unknown commands are ignored
     return segments
 
 # ---------------------------
-# DrawingWidget: строит timeline с учётом F и G04, анимация по времени
+# DrawingWidget: timeline с учётом F и G04, анимация по времени
 # ---------------------------
 class DrawingWidget(QWidget):
     def __init__(self, segments, parent=None):
@@ -196,22 +188,18 @@ class DrawingWidget(QWidget):
         self.margin = 20
         self.dot_px = 8
 
-        # timeline: список точек {'x', 'y', 'draw'(bool), 'dt' seconds to next}
         self.timeline = self.build_timeline(segments)
         self.index = 0
 
-        # timer single-shot (we schedule variable intervals)
         self.timer = QTimer(self)
         self.timer.setSingleShot(True)
         self.timer.timeout.connect(self.step)
         self.running = False
 
-        # transform/state
         self.user_zoom = 1.0
         self.invert_x = False
         self.invert_y = False
 
-        # bounding box (from timeline)
         self.min_x = 0.0; self.max_x = 1.0; self.min_y = 0.0; self.max_y = 1.0
         if self.timeline:
             xs = [p['x'] for p in self.timeline]
@@ -229,14 +217,12 @@ class DrawingWidget(QWidget):
 
     def build_timeline(self, segments):
         timeline = []
-        # minimum dt to avoid zero intervals (ms)
         MIN_DT = 0.01  # seconds
         for seg in segments:
             if seg['type'] == 'move':
                 pts = seg['points']
-                feed = seg.get('feedrate')  # mm/min
+                feed = seg.get('feedrate')
                 rapid = seg.get('rapid', False)
-                # choose feed: if None -> defaults (already set in parser), but keep safe
                 if feed is None:
                     feed = 3000.0 if rapid else 1000.0
                 speed_mm_s = max(0.001, feed / 60.0)
@@ -247,17 +233,12 @@ class DrawingWidget(QWidget):
                         dist = math.hypot(nx - x, ny - y)
                         dt = max(MIN_DT, dist / speed_mm_s)
                     else:
-                        dt = MIN_DT  # small pause to allow drawing last step
+                        dt = MIN_DT
                     timeline.append({'x': x, 'y': y, 'draw': bool(seg.get('laser', False)), 'dt': dt})
             elif seg['type'] == 'pause':
-                # append hold: duplicate last point with dt = pause
                 if timeline:
                     last = timeline[-1]
                     timeline.append({'x': last['x'], 'y': last['y'], 'draw': last['draw'], 'dt': max(MIN_DT, seg.get('pause', 0.0))})
-                else:
-                    # no previous point — skip
-                    pass
-        # ensure final point exists (with dt=0)
         if timeline:
             timeline[-1]['dt'] = 0.0
         return timeline
@@ -268,7 +249,6 @@ class DrawingWidget(QWidget):
         self.index = 0
         self.running = True
         self.update()
-        # schedule first step using dt of index 0
         first_dt = max(0.01, self.timeline[0]['dt'])
         self.timer.start(int(first_dt * 1000))
 
@@ -277,22 +257,18 @@ class DrawingWidget(QWidget):
         self.running = False
 
     def reset(self):
-        # stop and reset index to 0; do not start
         self.stop()
         self.index = 0
         self.update()
 
     def step(self):
-        # advance index and schedule next
         if self.index < len(self.timeline) - 1:
             self.index += 1
             self.update()
             next_dt = max(0.01, self.timeline[self.index]['dt'])
-            # schedule next
             if self.index < len(self.timeline) - 1:
                 self.timer.start(int(next_dt * 1000))
             else:
-                # last element: stop after small pause
                 self.timer.start(int(next_dt * 1000))
         else:
             self.stop()
@@ -326,7 +302,6 @@ class DrawingWidget(QWidget):
         pen_on = QPen(QColor("#e33"), 2)
         painter.setPen(pen_on)
 
-        # draw only traversed path up to current index
         for i in range(1, self.index + 1):
             a = self.timeline[i-1]
             b = self.timeline[i]
@@ -335,7 +310,6 @@ class DrawingWidget(QWidget):
                 bx, by = self.map_to_canvas((b['x'], b['y']), inner)
                 painter.drawLine(ax, ay, bx, by)
 
-        # draw current point
         cur = self.timeline[self.index]
         sx, sy = self.map_to_canvas((cur['x'], cur['y']), inner)
         if cur['draw']:
@@ -388,13 +362,84 @@ class DrawingWidget(QWidget):
         return sx, sy
 
 # ---------------------------
-# UI: visualization + controls (Restart, Zoom, Invert X/Y)
+# UI: окно выбора станка и визуализация с кнопкой "назад"
 # ---------------------------
+class MachineSelectionWindow(QWidget):
+    def __init__(self, parent_menu):
+        super().__init__()
+        self.parent_menu = parent_menu
+        self.init_ui()
+
+    def init_ui(self):
+        self.setWindowTitle("Выбор станка")
+        self.setGeometry(220, 140, 500, 340)
+        palette = QPalette()
+        palette.setColor(QPalette.Window, QColor(240, 240, 240))
+        self.setAutoFillBackground(True)
+        self.setPalette(palette)
+
+        # Top bar: back button + title
+        top_bar = QHBoxLayout()
+        back_btn = QPushButton("←")
+        back_btn.setFixedSize(36, 28)
+        back_btn.clicked.connect(self.on_back)
+        title = QLabel("Выберите тип станка")
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("font-size:20px; font-weight:bold;")
+        top_bar.addWidget(back_btn, alignment=Qt.AlignLeft)
+        top_bar.addStretch(1)
+        top_bar.addWidget(title, stretch=2)
+        top_bar.addStretch(2)
+
+        # Machine buttons
+        laser_btn = QPushButton("Лазерный")
+        drill_btn = QPushButton("Сверлильный")
+        mill_btn = QPushButton("Фрезерный")
+
+        for btn in (laser_btn, drill_btn, mill_btn):
+            btn.setMinimumHeight(48)
+            btn.setStyleSheet("background-color:#444; color:white; font-size:16px; border-radius:6px;")
+
+        laser_btn.clicked.connect(self.on_laser)
+        drill_btn.clicked.connect(lambda: self._not_ready("Сверлильный"))
+        mill_btn.clicked.connect(lambda: self._not_ready("Фрезерный"))
+
+        layout = QVBoxLayout()
+        layout.addLayout(top_bar)
+        layout.addSpacerItem(QSpacerItem(20, 20, QSizePolicy.Minimum, QSizePolicy.Expanding))
+        layout.addWidget(laser_btn, alignment=Qt.AlignCenter)
+        layout.addWidget(drill_btn, alignment=Qt.AlignCenter)
+        layout.addWidget(mill_btn, alignment=Qt.AlignCenter)
+        layout.addSpacerItem(QSpacerItem(20, 20, QSizePolicy.Minimum, QSizePolicy.Expanding))
+        self.setLayout(layout)
+
+    def on_back(self):
+        # return to main menu
+        self.close()
+        self.parent_menu.show()
+
+    def on_laser(self):
+        # launch visualization (reads gcode.txt)
+        try:
+            lines = load_gcode_lines("gcode.txt")
+            segments = parse_and_build_path(lines)
+            raw = "\n".join(lines)
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось прочитать gcode.txt:\n{e}")
+            return
+        self.close()
+        self.vw = VisualizationWindow(segments, raw, previous_window=self)
+        self.vw.show()
+
+    def _not_ready(self, name):
+        QMessageBox.information(self, "В процессе", f"{name} — в процессе разработки.")
+
 class VisualizationWindow(QWidget):
-    def __init__(self, segments, raw_text):
+    def __init__(self, segments, raw_text, previous_window=None):
         super().__init__()
         self.segments = segments
         self.raw_text = raw_text
+        self.previous_window = previous_window
         self.init_ui()
 
     def init_ui(self):
@@ -405,10 +450,18 @@ class VisualizationWindow(QWidget):
         self.setAutoFillBackground(True)
         self.setPalette(p)
 
-        title = QLabel("Процесс визуализации", self)
-        title.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
+        # Top bar: back button + title
+        top_bar = QHBoxLayout()
+        back_btn = QPushButton("←")
+        back_btn.setFixedSize(36, 28)
+        back_btn.clicked.connect(self.on_back)
+        title = QLabel("Процесс визуализации")
+        title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("font-size:28px; font-weight:bold; color:#222;")
-        title.setFixedHeight(60)
+        top_bar.addWidget(back_btn, alignment=Qt.AlignLeft)
+        top_bar.addStretch(1)
+        top_bar.addWidget(title, stretch=2)
+        top_bar.addStretch(2)
 
         # Drawing widget
         self.drawing = DrawingWidget(self.segments)
@@ -454,7 +507,7 @@ class VisualizationWindow(QWidget):
         hbox.addLayout(controls_layout)
 
         main_layout = QVBoxLayout()
-        main_layout.addWidget(title)
+        main_layout.addLayout(top_bar)
         main_layout.addLayout(hbox)
         self.setLayout(main_layout)
 
@@ -463,13 +516,25 @@ class VisualizationWindow(QWidget):
         self.drawing.set_user_zoom(value / 100.0)
 
     def on_restart(self):
-        # reset drawing widget and restart
         self.drawing.reset()
         self.drawing.start()
 
+    def on_back(self):
+        # stop animation, return to previous window
+        try:
+            self.drawing.stop()
+        except:
+            pass
+        self.close()
+        if self.previous_window:
+            self.previous_window.show()
+        else:
+            # fallback: show main menu
+            # do nothing (main menu closed earlier). Could re-open as needed.
+            pass
+
     def showEvent(self, event):
         super().showEvent(event)
-        # start animation once shown
         self.drawing.start()
 
 class MainMenu(QWidget):
@@ -480,34 +545,27 @@ class MainMenu(QWidget):
     def init_ui(self):
         self.setWindowTitle("Laser App - Главное меню")
         self.setGeometry(240, 160, 600, 420)
-        self.play_button = QPushButton("Играть")
+        self.start_button = QPushButton("Начать визуализацию")
         self.exit_button = QPushButton("Выход")
-        self.play_button.clicked.connect(self.on_play)
+        self.start_button.clicked.connect(self.on_start)
         self.exit_button.clicked.connect(self.close)
         style = """
-            QPushButton { background-color: #444; color:white; font-size:18px; padding:12px; border-radius:8px; min-width:160px;}
+            QPushButton { background-color: #444; color:white; font-size:18px; padding:12px; border-radius:8px; min-width:200px;}
             QPushButton:hover { background-color:#666; }
         """
-        self.play_button.setStyleSheet(style)
+        self.start_button.setStyleSheet(style)
         self.exit_button.setStyleSheet(style)
         layout = QVBoxLayout()
         layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
-        layout.addWidget(self.play_button, alignment=Qt.AlignHCenter)
+        layout.addWidget(self.start_button, alignment=Qt.AlignHCenter)
         layout.addWidget(self.exit_button, alignment=Qt.AlignHCenter)
         layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
         self.setLayout(layout)
 
-    def on_play(self):
-        try:
-            lines = load_gcode_lines("gcode.txt")
-            segments = parse_and_build_path(lines)
-            raw = "\n".join(lines)
-        except Exception as e:
-            raw = f"Ошибка чтения gcode.txt: {e}"
-            segments = []
-        self.close()
-        self.vw = VisualizationWindow(segments, raw)
-        self.vw.show()
+    def on_start(self):
+        self.hide()
+        self.ms = MachineSelectionWindow(parent_menu=self)
+        self.ms.show()
 
 # ---------------------------
 # Запуск
